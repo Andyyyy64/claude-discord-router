@@ -1,0 +1,5 @@
+{
+  "name": "claude-discord-router",
+  "private": true,
+  "workspaces": ["daemon", "plugin", "shared"]
+}

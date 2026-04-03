@@ -1,0 +1,11 @@
+{
+  "name": "claude-discord-router-daemon",
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "start": "bun run server.ts"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.0"
+  }
+}
