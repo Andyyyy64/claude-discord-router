@@ -1,0 +1,6 @@
+{
+  "name": "discord-router",
+  "description": "Discord channel router for Claude Code — routes multiple sessions to separate Discord channels based on working directory.",
+  "version": "0.0.1",
+  "keywords": ["discord", "routing", "channel", "mcp"]
+}
