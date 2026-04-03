@@ -91,7 +91,34 @@ async function handleRegister(
   ws.data.sessionId = sessionId
 
   const category = await ensureCategory(guild, cwd, config, state)
-  const channel = await createSessionChannel(guild, cwd, sessionId, state)
+
+  // Check if this session already has a channel (reconnect case)
+  const existingChannel = state.categories[cwd]?.channels[sessionId]
+  let channel: { channelId: string; channelName: string }
+
+  if (existingChannel) {
+    // Verify channel still exists on Discord
+    try {
+      await client.channels.fetch(existingChannel.channelId)
+      channel = existingChannel
+      existingChannel.active = true
+      saveState(state)
+      process.stderr.write(
+        `discord-router: session ${sessionId} reconnected -> #${channel.channelName} (${channel.channelId})\n`
+      )
+    } catch {
+      // Channel was deleted, create a new one
+      channel = await createSessionChannel(guild, cwd, sessionId, state)
+      process.stderr.write(
+        `discord-router: session ${sessionId} registered -> #${channel.channelName} (${channel.channelId})\n`
+      )
+    }
+  } else {
+    channel = await createSessionChannel(guild, cwd, sessionId, state)
+    process.stderr.write(
+      `discord-router: session ${sessionId} registered -> #${channel.channelName} (${channel.channelId})\n`
+    )
+  }
 
   router.register({
     sessionId,
@@ -100,10 +127,6 @@ async function handleRegister(
     channelName: channel.channelName,
     ws,
   })
-
-  process.stderr.write(
-    `discord-router: session ${sessionId} registered -> #${channel.channelName} (${channel.channelId})\n`
-  )
 
   ws.send(JSON.stringify({
     type: "registered",
@@ -239,7 +262,17 @@ async function handleClientMessage(
   ws: ServerWebSocket<{ sessionId: string }>,
   raw: string,
 ): Promise<void> {
-  const msg = JSON.parse(raw) as ClientMessage
+  let msg: ClientMessage
+  try {
+    msg = JSON.parse(raw) as ClientMessage
+  } catch {
+    ws.send(JSON.stringify({ type: "error", message: "Invalid JSON" }))
+    return
+  }
+  if (!msg.type) {
+    ws.send(JSON.stringify({ type: "error", message: "Missing message type" }))
+    return
+  }
   try {
     switch (msg.type) {
       case "register":

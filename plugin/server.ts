@@ -272,6 +272,8 @@ async function connect(): Promise<void> {
   return new Promise((resolve, reject) => {
     ws = new WebSocket(url)
 
+    const timeoutId = setTimeout(() => reject(new Error("Connection timeout")), 10000)
+
     ws.onopen = () => {
       process.stderr.write("discord-router-plugin: connected to daemon\n")
       sendWs({ type: "register", cwd, sessionId })
@@ -286,6 +288,7 @@ async function connect(): Promise<void> {
           process.stderr.write(
             `discord-router-plugin: registered as #${msg.channelName} (${msg.channelId})\n`
           )
+          clearTimeout(timeoutId)
           resolve()
           break
         case "message":
@@ -311,11 +314,9 @@ async function connect(): Promise<void> {
 
     ws.onerror = (err) => {
       process.stderr.write(`discord-router-plugin: WS error: ${err}\n`)
+      clearTimeout(timeoutId)
       reject(err)
     }
-
-    // Timeout connection attempt
-    setTimeout(() => reject(new Error("Connection timeout")), 10000)
   })
 }
 

@@ -130,7 +130,8 @@ function chunkText(text: string, limit: number): string[] {
   while (rest.length > limit) {
     const newline = rest.lastIndexOf("\n", limit)
     const space = rest.lastIndexOf(" ", limit)
-    const cut = newline > limit / 2 ? newline : space > 0 ? space : limit
+    let cut = newline > limit / 2 ? newline : space > 0 ? space : limit
+    if (cut <= 0) cut = limit
     out.push(rest.slice(0, cut))
     rest = rest.slice(cut).replace(/^\n+/, "")
   }

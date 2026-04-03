@@ -134,7 +134,9 @@ export const DEFAULT_CONFIG: Partial<Config> = {
   categoryPrefix: "",
 }
 
-export const CONFIG_DIR = `${process.env.HOME}/.config/claude-discord-router`
+import { homedir } from "os"
+
+export const CONFIG_DIR = `${homedir()}/.config/claude-discord-router`
 export const CONFIG_PATH = `${CONFIG_DIR}/config.json`
 export const STATE_PATH = `${CONFIG_DIR}/state.json`
 export const INBOX_DIR = `${CONFIG_DIR}/inbox`
