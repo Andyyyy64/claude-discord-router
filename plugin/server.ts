@@ -112,6 +112,8 @@ const mcp = new Server(
       'Messages from Discord arrive as <channel source="discord-router" chat_id="..." message_id="..." user="..." ts="...">.',
       "Reply with the reply tool — pass chat_id back.",
       "",
+      "IMPORTANT: After replying to a Discord message, do NOT output any additional text to the terminal. The reply tool already sent the message — no summary or confirmation is needed. Just call reply and stop.",
+      "",
       "The post tool sends a message to this session's Discord channel without needing a chat_id. Use it when you want to proactively share something to Discord.",
       "",
       "reply accepts file paths (files: [\"/abs/path.png\"]) for attachments.",
@@ -350,6 +352,7 @@ async function connect(): Promise<void> {
 }
 
 function handleInboundMessage(msg: InboundMessage): void {
+  process.stderr.write(`discord-router-plugin: [DEBUG] received inbound: "${msg.content.slice(0, 50)}" from ${msg.user}\n`)
   mcp.notification({
     method: "notifications/claude/channel",
     params: {
@@ -368,8 +371,10 @@ function handleInboundMessage(msg: InboundMessage): void {
           : {}),
       },
     },
+  }).then(() => {
+    process.stderr.write(`discord-router-plugin: [DEBUG] notification sent OK\n`)
   }).catch(err => {
-    process.stderr.write(`discord-router-plugin: failed to deliver message: ${err}\n`)
+    process.stderr.write(`discord-router-plugin: [DEBUG] notification FAILED: ${err}\n`)
   })
 }
 

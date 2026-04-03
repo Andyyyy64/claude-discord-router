@@ -47,10 +47,18 @@ client.on("error", err => {
 
 client.on("messageCreate", msg => {
   if (msg.author.bot) return
-  if (!router.isAllowed(msg.author.id, config)) return
+  process.stderr.write(`discord-router: [DEBUG] message from ${msg.author.username} in channel ${msg.channelId}: "${msg.content.slice(0, 50)}"\n`)
+  if (!router.isAllowed(msg.author.id, config)) {
+    process.stderr.write(`discord-router: [DEBUG] user ${msg.author.id} not in allowFrom\n`)
+    return
+  }
 
   const session = router.getSessionByChannel(msg.channelId)
-  if (!session) return
+  if (!session) {
+    process.stderr.write(`discord-router: [DEBUG] no session for channel ${msg.channelId}. Active sessions: ${JSON.stringify(router.getAllActiveSessions().map(s => ({ id: s.sessionId.slice(0, 8), ch: s.channelId, cwd: s.cwd })))}\n`)
+    return
+  }
+  process.stderr.write(`discord-router: [DEBUG] routing to session ${session.sessionId.slice(0, 8)} via channel ${session.channelId}\n`)
 
   const atts: string[] = []
   for (const att of msg.attachments.values()) {
