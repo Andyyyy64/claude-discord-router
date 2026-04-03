@@ -10,6 +10,7 @@ import type {
   EditMessage,
   FetchMessagesMessage,
   DownloadAttachmentMessage,
+  PostMessage,
   State,
 } from "../shared/protocol.ts"
 import { INBOX_DIR } from "../shared/protocol.ts"
@@ -83,6 +84,58 @@ if (!guild) {
 }
 
 // ── WebSocket Server ──
+
+// Ensure session has a channel, creating or reusing one if needed
+async function ensureSessionChannel(sessionId: string): Promise<{ channelId: string; channelName: string }> {
+  const session = router.getSession(sessionId)
+  if (!session) throw new Error(`Session ${sessionId} not found`)
+  if (session.channelId) return { channelId: session.channelId, channelName: session.channelName! }
+
+  const { cwd } = session
+  await ensureCategory(guild, cwd, config, state)
+  const category = state.categories[cwd]
+
+  // Try to reuse the most recent inactive channel for this cwd
+  let reused = false
+  if (category) {
+    const inactiveEntries = Object.entries(category.channels)
+      .filter(([, ch]) => !ch.active)
+      .sort((a, b) => new Date(b[1].createdAt).getTime() - new Date(a[1].createdAt).getTime())
+
+    for (const [oldKey, ch] of inactiveEntries) {
+      try {
+        await client.channels.fetch(ch.channelId)
+        // Channel exists, reuse it
+        ch.active = true
+        // Re-key under new sessionId if needed
+        if (oldKey !== sessionId) {
+          category.channels[sessionId] = ch
+          delete category.channels[oldKey]
+        }
+        saveState(state)
+        router.assignChannel(sessionId, ch.channelId, ch.channelName)
+        process.stderr.write(
+          `discord-router: session ${sessionId} reusing -> #${ch.channelName} (${ch.channelId})\n`
+        )
+        reused = true
+        return { channelId: ch.channelId, channelName: ch.channelName }
+      } catch {
+        // Channel deleted on Discord, skip
+        delete category.channels[oldKey]
+        saveState(state)
+      }
+    }
+  }
+
+  // No reusable channel, create new one
+  const channel = await createSessionChannel(guild, cwd, sessionId, state)
+  router.assignChannel(sessionId, channel.channelId, channel.channelName)
+  process.stderr.write(
+    `discord-router: session ${sessionId} created -> #${channel.channelName} (${channel.channelId})\n`
+  )
+  return { channelId: channel.channelId, channelName: channel.channelName }
+}
+
 async function handleRegister(
   ws: ServerWebSocket<{ sessionId: string }>,
   msg: RegisterMessage,
@@ -90,48 +143,23 @@ async function handleRegister(
   const { cwd, sessionId } = msg
   ws.data.sessionId = sessionId
 
-  const category = await ensureCategory(guild, cwd, config, state)
-
-  // Check if this session already has a channel (reconnect case)
-  const existingChannel = state.categories[cwd]?.channels[sessionId]
-  let channel: { channelId: string; channelName: string }
-
-  if (existingChannel) {
-    // Verify channel still exists on Discord
-    try {
-      await client.channels.fetch(existingChannel.channelId)
-      channel = existingChannel
-      existingChannel.active = true
-      saveState(state)
-      process.stderr.write(
-        `discord-router: session ${sessionId} reconnected -> #${channel.channelName} (${channel.channelId})\n`
-      )
-    } catch {
-      // Channel was deleted, create a new one
-      channel = await createSessionChannel(guild, cwd, sessionId, state)
-      process.stderr.write(
-        `discord-router: session ${sessionId} registered -> #${channel.channelName} (${channel.channelId})\n`
-      )
-    }
-  } else {
-    channel = await createSessionChannel(guild, cwd, sessionId, state)
-    process.stderr.write(
-      `discord-router: session ${sessionId} registered -> #${channel.channelName} (${channel.channelId})\n`
-    )
-  }
-
+  // Register session without channel (lazy creation)
   router.register({
     sessionId,
     cwd,
-    channelId: channel.channelId,
-    channelName: channel.channelName,
+    channelId: null,
+    channelName: null,
     ws,
   })
 
+  process.stderr.write(
+    `discord-router: session ${sessionId} registered (pending channel) for ${cwd}\n`
+  )
+
   ws.send(JSON.stringify({
     type: "registered",
-    channelId: channel.channelId,
-    channelName: channel.channelName,
+    channelId: null,
+    channelName: null,
   }))
 }
 
@@ -258,6 +286,20 @@ async function handleDownloadAttachment(msg: DownloadAttachmentMessage): Promise
   }
 }
 
+async function handlePost(ws: ServerWebSocket<{ sessionId: string }>, msg: PostMessage): Promise<void> {
+  const sessionId = ws.data.sessionId
+  const { channelId } = await ensureSessionChannel(sessionId)
+  const sentIds = await sendToChannel(client, channelId, msg.text)
+  ws.send(JSON.stringify({
+    type: "result",
+    requestId: msg.requestId,
+    success: true,
+    data: sentIds.length === 1
+      ? `sent (id: ${sentIds[0]})`
+      : `sent ${sentIds.length} parts (ids: ${sentIds.join(", ")})`,
+  }))
+}
+
 async function handleClientMessage(
   ws: ServerWebSocket<{ sessionId: string }>,
   raw: string,
@@ -281,6 +323,9 @@ async function handleClientMessage(
       case "deregister":
         router.deregister(msg.sessionId, state)
         process.stderr.write(`discord-router: session ${msg.sessionId} deregistered\n`)
+        break
+      case "post":
+        await handlePost(ws, msg)
         break
       case "reply":
         await handleReply(msg)

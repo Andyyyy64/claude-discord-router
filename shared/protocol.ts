@@ -50,6 +50,12 @@ export type DownloadAttachmentMessage = {
   requestId: string
 }
 
+export type PostMessage = {
+  type: "post"
+  text: string
+  requestId: string
+}
+
 export type ClientMessage =
   | RegisterMessage
   | DeregisterMessage
@@ -58,13 +64,14 @@ export type ClientMessage =
   | EditMessage
   | FetchMessagesMessage
   | DownloadAttachmentMessage
+  | PostMessage
 
 // ── Daemon -> Client ──
 
 export type RegisteredMessage = {
   type: "registered"
-  channelId: string
-  channelName: string
+  channelId: string | null
+  channelName: string | null
 }
 
 export type InboundMessage = {

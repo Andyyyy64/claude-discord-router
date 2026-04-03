@@ -11,8 +11,8 @@ import { saveState } from "./config.ts"
 export type Session = {
   sessionId: string
   cwd: string
-  channelId: string
-  channelName: string
+  channelId: string | null
+  channelName: string | null
   ws: ServerWebSocket<{ sessionId: string }>
 }
 
@@ -24,20 +24,38 @@ export class Router {
 
   register(session: Session): void {
     this.sessions.set(session.sessionId, session)
-    this.channelToSession.set(session.channelId, session)
+    if (session.channelId) {
+      this.channelToSession.set(session.channelId, session)
+    }
+  }
+
+  assignChannel(sessionId: string, channelId: string, channelName: string): void {
+    const session = this.sessions.get(sessionId)
+    if (!session) return
+    session.channelId = channelId
+    session.channelName = channelName
+    this.channelToSession.set(channelId, session)
   }
 
   deregister(sessionId: string, state: State): void {
     const session = this.sessions.get(sessionId)
     if (!session) return
-    this.channelToSession.delete(session.channelId)
+    if (session.channelId) {
+      this.channelToSession.delete(session.channelId)
+    }
     this.sessions.delete(sessionId)
 
     // Mark inactive in state
     const category = state.categories[session.cwd]
-    if (category?.channels[sessionId]) {
-      category.channels[sessionId].active = false
-      saveState(state)
+    if (category) {
+      // Find channel entry by channelId (not sessionId, since we reuse channels)
+      for (const [key, ch] of Object.entries(category.channels)) {
+        if (ch.channelId === session.channelId) {
+          ch.active = false
+          saveState(state)
+          break
+        }
+      }
     }
   }
 

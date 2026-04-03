@@ -107,10 +107,15 @@ const mcp = new Server(
       },
     },
     instructions: [
-      "The sender reads Discord, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat.",
+      "This session is mirrored to a Discord channel. IMPORTANT: After EVERY response you give (whether the user messaged from terminal or Discord), use the 'post' tool to mirror the interaction to Discord.",
       "",
-      'Messages from Discord arrive as <channel source="discord-router" chat_id="..." message_id="..." user="..." ts="...">.',
-      "Reply with the reply tool — pass chat_id back.",
+      "Format for the post tool:",
+      "**User:** [what the user asked/said]",
+      "**Claude:** [your response - keep concise, max ~1500 chars. For long responses, summarize key points]",
+      "",
+      "Always mirror, even for short responses. This creates a browsable session transcript in Discord.",
+      "",
+      'Messages from Discord arrive as <channel source="discord-router" chat_id="..." message_id="..." user="..." ts="...">. For Discord messages, use the reply tool (pass chat_id back) AND also post the mirror.',
       "",
       "reply accepts file paths (files: [\"/abs/path.png\"]) for attachments.",
       "Use react to add emoji reactions, and edit_message for interim progress updates.",
@@ -121,6 +126,18 @@ const mcp = new Server(
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
+    {
+      name: "post",
+      description:
+        "Post a message to this session's Discord channel. Use this to mirror every conversation turn (user input + your response) to Discord. No chat_id needed — it posts to your session's channel automatically. The channel is created on first use.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          text: { type: "string", description: "The text to post to Discord." },
+        },
+        required: ["text"],
+      },
+    },
     {
       name: "reply",
       description:
@@ -197,6 +214,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   const args = (req.params.arguments ?? {}) as Record<string, unknown>
   try {
     switch (req.params.name) {
+      case "post": {
+        const result = await requestWs({
+          type: "post",
+          text: args.text as string,
+        })
+        return { content: [{ type: "text", text: String(result) }] }
+      }
       case "reply": {
         const result = await requestWs({
           type: "reply",
@@ -285,9 +309,15 @@ async function connect(): Promise<void> {
         case "registered":
           channelId = msg.channelId
           channelName = msg.channelName
-          process.stderr.write(
-            `discord-router-plugin: registered as #${msg.channelName} (${msg.channelId})\n`
-          )
+          if (msg.channelId) {
+            process.stderr.write(
+              `discord-router-plugin: registered as #${msg.channelName} (${msg.channelId})\n`
+            )
+          } else {
+            process.stderr.write(
+              `discord-router-plugin: registered (channel will be created on first use)\n`
+            )
+          }
           clearTimeout(timeoutId)
           resolve()
           break
