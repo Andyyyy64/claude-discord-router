@@ -360,7 +360,33 @@ async function handleClientMessage(
 const wsServer = Bun.serve<{ sessionId: string }>({
   hostname: "127.0.0.1",
   port: config.daemonPort,
-  fetch(req, server) {
+  async fetch(req, server) {
+    const url = new URL(req.url)
+
+    // HTTP endpoint for hook-based mirroring
+    if (url.pathname === "/mirror" && req.method === "POST") {
+      try {
+        const body = await req.json() as { cwd: string; text: string }
+        if (!body.cwd || !body.text) {
+          return new Response("Missing cwd or text", { status: 400 })
+        }
+        // Find active session for this cwd
+        const sessions = router.getAllActiveSessions()
+        const session = sessions.find(s => s.cwd === body.cwd)
+        if (!session) {
+          return new Response("No active session for cwd", { status: 404 })
+        }
+        // Ensure channel exists
+        const { channelId } = await ensureSessionChannel(session.sessionId)
+        await sendToChannel(client, channelId, body.text)
+        return new Response("OK", { status: 200 })
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        process.stderr.write(`discord-router: mirror error: ${msg}\n`)
+        return new Response(msg, { status: 500 })
+      }
+    }
+
     const upgraded = server.upgrade(req, { data: { sessionId: "" } })
     if (!upgraded) {
       return new Response("WebSocket upgrade required", { status: 426 })
