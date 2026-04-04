@@ -8,6 +8,8 @@ import {
   type TextChannel,
 } from "discord.js"
 import { basename } from "path"
+import { readFileSync } from "fs"
+import { homedir } from "os"
 import type { Config, State, CategoryEntry, ChannelEntry } from "../shared/protocol.ts"
 import { saveState } from "./config.ts"
 
@@ -93,6 +95,81 @@ export async function createSessionChannel(
   category.channels[sessionId] = entry
   saveState(state)
   return entry
+}
+
+export function slugify(text: string): string {
+  let s = text.trim()
+  if (!s) return "session"
+  s = s.replace(/\s+/g, "-")
+  s = s.replace(/[^\p{L}\p{N}\-_]/gu, "")
+  s = s.replace(/-{2,}/g, "-")
+  s = s.replace(/^[-_]+|[-_]+$/g, "")
+  return s.toLowerCase() || "session"
+}
+
+function loadClaudeOAuthToken(): string | null {
+  try {
+    const credsPath = `${homedir()}/.claude/.credentials.json`
+    const creds = JSON.parse(readFileSync(credsPath, "utf8"))
+    const token = creds?.claudeAiOauth?.accessToken
+    if (!token) return null
+    // Check expiry
+    const expiresAt = creds?.claudeAiOauth?.expiresAt
+    if (expiresAt && Date.now() > expiresAt) {
+      process.stderr.write("discord-router: Claude OAuth token expired\n")
+      return null
+    }
+    return token
+  } catch {
+    return null
+  }
+}
+
+export async function summarizeTopic(text: string, apiKey?: string): Promise<string> {
+  const key = apiKey || loadClaudeOAuthToken()
+  if (!key) return slugify(text.slice(0, 15))
+
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 30,
+        messages: [{
+          role: "user",
+          content: `Summarize this user prompt as a Discord channel name: 1-3 words in English, lowercase, hyphens between words, no special chars. Only output the channel name, nothing else.\n\nPrompt: ${text.slice(0, 300)}`,
+        }],
+      }),
+    })
+
+    if (!res.ok) {
+      process.stderr.write(`discord-router: summarize API error: ${res.status}\n`)
+      return slugify(text.slice(0, 15))
+    }
+
+    const data = await res.json() as { content: Array<{ text: string }> }
+    const summary = data.content?.[0]?.text?.trim() ?? ""
+    return slugify(summary) || slugify(text.slice(0, 15))
+  } catch (err) {
+    process.stderr.write(`discord-router: summarize failed: ${err}\n`)
+    return slugify(text.slice(0, 15))
+  }
+}
+
+export async function renameChannel(
+  client: Client,
+  channelId: string,
+  newName: string,
+): Promise<void> {
+  const channel = await client.channels.fetch(channelId)
+  if (channel && "setName" in channel) {
+    await (channel as TextChannel).setName(newName)
+  }
 }
 
 export async function sendToChannel(

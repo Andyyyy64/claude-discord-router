@@ -15,10 +15,12 @@ import type {
 } from "../shared/protocol.ts"
 import { INBOX_DIR } from "../shared/protocol.ts"
 import { loadConfig, loadState, saveState, ensureConfigDir } from "./config.ts"
-import { createDiscordClient, ensureCategory, createSessionChannel, sendToChannel } from "./discord.ts"
+import { createDiscordClient, ensureCategory, createSessionChannel, sendToChannel, summarizeTopic, renameChannel } from "./discord.ts"
 import { Router } from "./router.ts"
 
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+const RENAME_COOLDOWN_MS = 10 * 60 * 1000 // Discord rate limit: 2 per 10 min
+const channelRenameTracker = new Map<string, number>() // channelId -> last rename timestamp
 
 ensureConfigDir()
 const config = loadConfig()
@@ -115,6 +117,7 @@ async function ensureSessionChannel(sessionId: string): Promise<{ channelId: str
         await client.channels.fetch(ch.channelId)
         // Channel exists, reuse it
         ch.active = true
+        channelRenameTracker.delete(ch.channelId)
         // Re-key under new sessionId if needed
         if (oldKey !== sessionId) {
           category.channels[sessionId] = ch
@@ -393,6 +396,41 @@ const wsServer = Bun.serve<{ sessionId: string }>({
         // Ensure channel exists
         const { channelId } = await ensureSessionChannel(session.sessionId)
         await sendToChannel(client, channelId, body.text)
+
+        // Auto-rename channel based on user prompt topic
+        if (body.text.startsWith("**User:**")) {
+          const userMsg = body.text.replace(/^\*\*User:\*\*\s*/, "")
+          const now = Date.now()
+          const lastRename = channelRenameTracker.get(channelId)
+          const canRename = !lastRename || (now - lastRename > RENAME_COOLDOWN_MS)
+
+          if (canRename && userMsg.trim()) {
+            const category = state.categories[session.cwd]
+            const chEntry = category
+              ? Object.values(category.channels).find(ch => ch.channelId === channelId)
+              : null
+            // Extract channel number from current name
+            const numMatch = chEntry?.channelName.match(/(\d+)/)
+            const num = numMatch ? numMatch[1] : "1"
+            // Fire-and-forget rename (don't block mirror response)
+            summarizeTopic(userMsg)
+              .then(async topic => {
+                const newName = `${num}-${topic}`
+                await renameChannel(client, channelId, newName)
+                channelRenameTracker.set(channelId, now)
+                if (chEntry) {
+                  chEntry.channelName = newName
+                  saveState(state)
+                }
+                router.assignChannel(session!.sessionId, channelId, newName)
+                process.stderr.write(`discord-router: channel renamed to #${newName}\n`)
+              })
+              .catch(err => {
+                process.stderr.write(`discord-router: rename failed: ${err}\n`)
+              })
+          }
+        }
+
         return new Response("OK", { status: 200 })
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
