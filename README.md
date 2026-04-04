@@ -1,42 +1,66 @@
 # Claude Discord Router
 
-Routes multiple Claude Code sessions to separate Discord channels based on working directory. Each session gets its own channel, organized under categories by project.
+> **Route multiple Claude Code sessions to separate Discord channels** — manage all your coding sessions from your phone.
 
-## Architecture
+Run `cc` in any project directory. A Discord channel is automatically created. Talk to Claude from Discord, or just watch the conversation mirror in real-time.
 
 ```
-Discord Server
-├── projectA (category)
-│   ├── #projectA-1 → Claude Code session in ~/projectA
-│   └── #projectA-2 → Another session in ~/projectA
-├── projectB (category)
-│   └── #projectB-1 → Claude Code session in ~/projectB
+Discord Server (auto-managed)
+├── projectA/
+│   ├── #projectA-1  ←→  Claude Code session (~/projectA)
+│   └── #projectA-2  ←→  Another session (~/projectA)
+├── projectB/
+│   └── #projectB-1  ←→  Claude Code session (~/projectB)
 ```
 
-Two components:
-- **Daemon**: Persistent process running Discord bot + WebSocket server. Auto-creates channels, routes messages.
-- **Plugin**: MCP plugin loaded by Claude Code. Connects to daemon via WebSocket, relays messages.
+## Features
 
-## Prerequisites
+- **Auto channel creation** — Categories and channels are created per working directory, on first use
+- **Channel reuse** — `--resume` reuses the existing channel instead of creating a new one
+- **Bidirectional messaging** — Send commands from Discord, get responses back
+- **Conversation mirroring** — Terminal conversation is automatically posted to Discord via hooks (no visible tool calls)
+- **Multi-session** — Run multiple `cc` sessions across different projects simultaneously
+- **Lazy daemon** — Daemon starts automatically on first `cc`, no manual setup needed
 
-- [Bun](https://bun.sh) runtime
-- Discord bot with:
-  - `Manage Channels` permission
-  - `Send Messages` permission
-  - `Read Messages/View Channels` permission
-  - `Message Content` privileged intent enabled
-- A dedicated Discord server for the bot
+## How It Works
+
+```
+┌──────────────────────────────────────────┐
+│  Router Daemon (auto-started)            │
+│  Discord Bot + WebSocket Server          │
+│  Channel management + Message routing    │
+└─────┬──────────┬──────────┬──────────────┘
+      │WS        │WS        │WS
+   Plugin A   Plugin B   Plugin C    ← MCP plugins (per session)
+      │          │          │
+  [Claude]   [Claude]   [Claude]     ← Claude Code sessions
+  ~/projA    ~/projA    ~/projB
+```
+
+**Daemon**: Single persistent process. Runs the Discord bot, manages channels, routes messages between Discord and sessions.
+
+**Plugin**: Lightweight MCP server loaded by each Claude Code session. Connects to daemon via WebSocket, relays messages bidirectionally.
 
 ## Setup
 
-1. Clone and install:
+### 1. Prerequisites
+
+- [Bun](https://bun.sh) runtime
+- A Discord bot ([create one here](https://discord.com/developers/applications)) with:
+  - `Manage Channels`, `Send Messages`, `Read Messages/View Channels` permissions
+  - `Message Content` privileged intent enabled
+- A dedicated Discord server — invite the bot to it
+
+### 2. Install
+
 ```bash
 git clone https://github.com/Andyyyy64/claude-discord-router.git
 cd claude-discord-router
 bun install
 ```
 
-2. Create config:
+### 3. Configure
+
 ```bash
 mkdir -p ~/.config/claude-discord-router
 cat > ~/.config/claude-discord-router/config.json << 'EOF'
@@ -50,29 +74,71 @@ EOF
 chmod 600 ~/.config/claude-discord-router/config.json
 ```
 
-3. Update your shell alias:
-```bash
-alias cc="CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions --channels /path/to/claude-discord-router/plugin"
+### 4. Register MCP server
+
+Add to `~/.claude.json`:
+
+```json
+{
+  "mcpServers": {
+    "discord-router": {
+      "command": "bun",
+      "args": ["run", "/path/to/claude-discord-router/plugin/server.ts"]
+    }
+  }
+}
 ```
 
-4. Run `cc` in any project directory. The daemon starts automatically, creates a Discord category + channel, and routes messages.
+### 5. Set up shell alias
 
-## Config Options
+```bash
+# Add to ~/.zshrc or ~/.bashrc
+alias cc="claude --dangerously-skip-permissions --dangerously-load-development-channels server:discord-router"
+```
+
+### 6. (Optional) Auto-mirror conversation to Discord
+
+Add a Stop hook to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.config/claude-discord-router/mirror-hook.sh",
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The mirror hook script is installed at `~/.config/claude-discord-router/mirror-hook.sh` — it posts Claude's responses to the session's Discord channel in the background, with zero visual noise in the terminal.
+
+### 7. Use it
+
+```bash
+cd ~/my-project
+cc  # Channel auto-created on first interaction
+```
+
+## Config
 
 | Key | Description | Default |
 |-----|-------------|---------|
 | `discordBotToken` | Discord bot token | required |
 | `guildId` | Discord server ID | required |
-| `allowFrom` | Array of Discord user IDs allowed to send | required |
-| `daemonPort` | WebSocket port for daemon | `9249` |
-| `categoryPrefix` | Prefix for category names | `""` |
+| `allowFrom` | Discord user IDs allowed to send messages | required |
+| `daemonPort` | WebSocket server port | `9249` |
+| `categoryPrefix` | Prefix for category names (e.g. `cc-`) | `""` |
 
-## Manual Daemon Management
+Config location: `~/.config/claude-discord-router/config.json`
 
-```bash
-# Start daemon manually
-cd /path/to/claude-discord-router && bun run daemon/server.ts
+## License
 
-# Check if running
-cat ~/.config/claude-discord-router/state.json | jq .daemon
-```
+MIT
