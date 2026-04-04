@@ -374,15 +374,21 @@ const wsServer = Bun.serve<{ sessionId: string }>({
     // HTTP endpoint for hook-based mirroring
     if (url.pathname === "/mirror" && req.method === "POST") {
       try {
-        const body = await req.json() as { cwd: string; text: string }
-        if (!body.cwd || !body.text) {
-          return new Response("Missing cwd or text", { status: 400 })
+        const body = await req.json() as { cwd: string; text: string; sessionId?: string }
+        if (!body.text) {
+          return new Response("Missing text", { status: 400 })
         }
-        // Find active session for this cwd
-        const sessions = router.getAllActiveSessions()
-        const session = sessions.find(s => s.cwd === body.cwd)
+        // Find session by sessionId (exact) or fallback to cwd (legacy)
+        let session
+        if (body.sessionId) {
+          session = router.getSession(body.sessionId)
+        }
+        if (!session && body.cwd) {
+          const sessions = router.getAllActiveSessions()
+          session = sessions.find(s => s.cwd === body.cwd)
+        }
         if (!session) {
-          return new Response("No active session for cwd", { status: 404 })
+          return new Response("No active session found", { status: 404 })
         }
         // Ensure channel exists
         const { channelId } = await ensureSessionChannel(session.sessionId)

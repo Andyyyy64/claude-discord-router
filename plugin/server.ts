@@ -5,7 +5,7 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js"
-import { readFileSync } from "fs"
+import { readFileSync, writeFileSync, mkdirSync, unlinkSync } from "fs"
 import { spawn } from "child_process"
 import { randomUUID } from "crypto"
 import type {
@@ -64,6 +64,13 @@ function startDaemon(): void {
 const config = loadConfig()
 const sessionId = randomUUID()
 const cwd = process.cwd()
+
+// Write PID → sessionId mapping so the mirror hook can find us
+const SESSION_MAP_DIR = `${CONFIG_PATH.replace("/config.json", "")}/plugin-pids`
+const pidFile = `${SESSION_MAP_DIR}/${process.ppid}`
+mkdirSync(SESSION_MAP_DIR, { recursive: true })
+writeFileSync(pidFile, JSON.stringify({ sessionId, cwd }))
+
 let ws: WebSocket | null = null
 let channelId: string | null = null
 let channelName: string | null = null
@@ -405,6 +412,7 @@ function shutdown(): void {
   if (shuttingDown) return
   shuttingDown = true
   process.stderr.write("discord-router-plugin: shutting down\n")
+  try { unlinkSync(pidFile) } catch {}
   if (ws && ws.readyState === WebSocket.OPEN) {
     sendWs({ type: "deregister", sessionId })
   }
