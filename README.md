@@ -2,7 +2,7 @@
 
 > **Route multiple Claude Code sessions to separate Discord channels** — manage all your coding sessions from your phone.
 
-Run `cc` in any project directory. A Discord channel is automatically created. Talk to Claude from Discord, or just watch the conversation mirror in real-time.
+Run Claude Code in any project directory. A Discord channel is automatically created. Talk to Claude from Discord, or just watch the conversation mirror in real-time.
 
 ```
 Discord Server (auto-managed)
@@ -16,11 +16,11 @@ Discord Server (auto-managed)
 ## Features
 
 - **Auto channel creation** — Categories and channels are created per working directory, on first use
-- **Channel reuse** — `--resume` reuses the existing channel instead of creating a new one
+- **Channel reuse** — Resuming a session reuses the existing channel instead of creating a new one
 - **Bidirectional messaging** — Send commands from Discord, get responses back
 - **Conversation mirroring** — Both user input and Claude's responses are automatically posted to Discord via async hooks (zero terminal noise)
-- **Multi-session** — Run multiple `cc` sessions across different projects simultaneously
-- **Lazy daemon** — Daemon starts automatically on first `cc`, no manual setup needed
+- **Multi-session** — Run multiple Claude Code sessions across different projects simultaneously
+- **Lazy daemon** — Daemon starts automatically on first session, no manual setup needed
 
 ## How It Works
 
@@ -48,6 +48,7 @@ Discord Server (auto-managed)
 ### 1. Prerequisites
 
 - [Bun](https://bun.sh) runtime
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI
 - A Discord bot ([create one here](https://discord.com/developers/applications)) with:
   - `Manage Channels`, `Send Messages`, `Read Messages/View Channels` permissions
   - `Message Content` privileged intent enabled
@@ -91,16 +92,24 @@ Add to `~/.claude.json` (merge with existing content):
 }
 ```
 
-### 5. Set up shell alias
+### 5. Launch Claude Code with the channel
+
+```bash
+claude --dangerously-load-development-channels server:discord-router
+```
+
+Or add it to your shell alias:
 
 ```bash
 # Add to ~/.zshrc or ~/.bashrc
-alias cc="claude --dangerously-skip-permissions --dangerously-load-development-channels server:discord-router"
+alias claude-discord="claude --dangerously-load-development-channels server:discord-router"
 ```
 
-### 6. Set up conversation mirroring
+### 6. (Optional) Set up conversation mirroring
 
-Create the mirror hook script:
+This mirrors both user input and Claude's responses to the Discord channel automatically. Without this, only Discord ↔ Claude Code bidirectional messaging works (no terminal conversation mirroring).
+
+Install the mirror hook script:
 
 ```bash
 cp mirror-hook.sh ~/.config/claude-discord-router/mirror-hook.sh
@@ -138,13 +147,13 @@ Add hooks to `~/.claude/settings.json` (merge with existing content):
 }
 ```
 
-This mirrors both **user input** (`**User:** ...`) and **Claude's responses** (`**Claude:** ...`) to the Discord channel. The `async: true` flag means it runs in the background with zero visual noise in the terminal.
+The `async: true` flag means hooks run in the background with zero visual noise in the terminal.
 
 ### 7. Use it
 
 ```bash
-cd ~/my-project
-cc  # Channel auto-created on first interaction
+claude --dangerously-load-development-channels server:discord-router
+# Channel auto-created on first interaction
 ```
 
 Open Discord on your phone and you'll see the conversation appearing in real-time. You can also send messages from Discord to control Claude.
