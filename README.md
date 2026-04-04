@@ -18,7 +18,7 @@ Discord Server (auto-managed)
 - **Auto channel creation** — Categories and channels are created per working directory, on first use
 - **Channel reuse** — `--resume` reuses the existing channel instead of creating a new one
 - **Bidirectional messaging** — Send commands from Discord, get responses back
-- **Conversation mirroring** — Terminal conversation is automatically posted to Discord via hooks (no visible tool calls)
+- **Conversation mirroring** — Both user input and Claude's responses are automatically posted to Discord via async hooks (zero terminal noise)
 - **Multi-session** — Run multiple `cc` sessions across different projects simultaneously
 - **Lazy daemon** — Daemon starts automatically on first `cc`, no manual setup needed
 
@@ -40,6 +40,8 @@ Discord Server (auto-managed)
 **Daemon**: Single persistent process. Runs the Discord bot, manages channels, routes messages between Discord and sessions.
 
 **Plugin**: Lightweight MCP server loaded by each Claude Code session. Connects to daemon via WebSocket, relays messages bidirectionally.
+
+**Mirror Hooks**: Claude Code's `UserPromptSubmit` and `Stop` hooks post user input and Claude's responses to Discord in the background — completely invisible in the terminal.
 
 ## Setup
 
@@ -76,7 +78,7 @@ chmod 600 ~/.config/claude-discord-router/config.json
 
 ### 4. Register MCP server
 
-Add to `~/.claude.json`:
+Add to `~/.claude.json` (merge with existing content):
 
 ```json
 {
@@ -96,13 +98,31 @@ Add to `~/.claude.json`:
 alias cc="claude --dangerously-skip-permissions --dangerously-load-development-channels server:discord-router"
 ```
 
-### 6. (Optional) Auto-mirror conversation to Discord
+### 6. Set up conversation mirroring
 
-Add a Stop hook to `~/.claude/settings.json`:
+Create the mirror hook script:
+
+```bash
+cp mirror-hook.sh ~/.config/claude-discord-router/mirror-hook.sh
+chmod +x ~/.config/claude-discord-router/mirror-hook.sh
+```
+
+Add hooks to `~/.claude/settings.json` (merge with existing content):
 
 ```json
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.config/claude-discord-router/mirror-hook.sh",
+            "async": true
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
@@ -118,7 +138,7 @@ Add a Stop hook to `~/.claude/settings.json`:
 }
 ```
 
-The mirror hook script is installed at `~/.config/claude-discord-router/mirror-hook.sh` — it posts Claude's responses to the session's Discord channel in the background, with zero visual noise in the terminal.
+This mirrors both **user input** (`**User:** ...`) and **Claude's responses** (`**Claude:** ...`) to the Discord channel. The `async: true` flag means it runs in the background with zero visual noise in the terminal.
 
 ### 7. Use it
 
@@ -126,6 +146,8 @@ The mirror hook script is installed at `~/.config/claude-discord-router/mirror-h
 cd ~/my-project
 cc  # Channel auto-created on first interaction
 ```
+
+Open Discord on your phone and you'll see the conversation appearing in real-time. You can also send messages from Discord to control Claude.
 
 ## Config
 
