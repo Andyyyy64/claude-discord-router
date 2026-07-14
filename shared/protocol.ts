@@ -4,6 +4,7 @@ export type RegisterMessage = {
   type: "register"
   cwd: string
   sessionId: string
+  channelId?: string | null
 }
 
 export type DeregisterMessage = {
@@ -78,6 +79,19 @@ export type InboundMessage = {
   type: "message"
   chatId: string
   messageId: string
+  sourceChatId?: string
+  sourceMessageId?: string
+  replyTo?: {
+    chatId: string
+    messageId: string
+    user?: string
+    userId?: string
+    content?: string
+    ts?: string
+    url?: string
+    attachmentCount?: number
+    attachments?: string[]
+  }
   user: string
   userId: string
   content: string

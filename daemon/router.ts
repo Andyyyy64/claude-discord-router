@@ -13,6 +13,7 @@ export type Session = {
   cwd: string
   channelId: string | null
   channelName: string | null
+  pinned?: boolean
   ws: ServerWebSocket<{ sessionId: string }>
 }
 

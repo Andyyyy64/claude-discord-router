@@ -18,6 +18,8 @@ export function createDiscordClient(): Client {
     intents: [
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.GuildMessageTyping,
+      GatewayIntentBits.DirectMessages,
       GatewayIntentBits.MessageContent,
     ],
     partials: [Partials.Channel],

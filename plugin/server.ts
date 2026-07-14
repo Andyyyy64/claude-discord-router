@@ -62,8 +62,10 @@ function startDaemon(): void {
 
 // ── WebSocket Connection ──
 const config = loadConfig()
-const sessionId = randomUUID()
+const sessionId = process.env.CDR_SESSION_ID ?? randomUUID()
 const cwd = process.cwd()
+const pinnedChannelId = process.env.CDR_CHANNEL_ID ?? null
+const CLAUDE_ACK_REACTION = process.env.CDR_CLAUDE_ACK_REACTION ?? "🧠"
 
 // Write PID → sessionId mapping so the mirror hook can find us
 const SESSION_MAP_DIR = `${CONFIG_PATH.replace("/config.json", "")}/plugin-pids`
@@ -117,15 +119,20 @@ const mcp = new Server(
       "The sender reads Discord, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat.",
       "",
       'Messages from Discord arrive as <channel source="discord-router" chat_id="..." message_id="..." user="..." ts="...">.',
+      'The meta also includes source_chat_id/source_message_id. For direct @stod-agent requests, chat_id may be a created thread while source_chat_id points to the original message channel.',
+      "If the Discord message was a reply, meta includes reply_to_* fields and the notification body includes a [Discord reply context] block. Treat Japanese demonstratives like 「これ」「この件」「それ」 as referring to that reply target unless the user says otherwise.",
+      "When a request uses 「これ」「この件」「それ」 and no reply_to context is available, fetch Discord history or ask for clarification before creating tasks, editing external systems, sending messages, or taking other side effects.",
+      `As soon as you actually receive a Discord request and start handling it, first call react with emoji "${CLAUDE_ACK_REACTION}" on source_chat_id/source_message_id (fallback: chat_id/message_id). This is the Claude-side receipt marker; the router-side marker is separate.`,
       "Reply with the reply tool — pass chat_id back.",
+      "For direct @stod-agent requests, chat_id may already be a task/request thread created from the source message. In that case, keep the answer inside that chat_id thread; reply_to is optional.",
       "",
       "IMPORTANT: After replying to a Discord message, do NOT output any additional text to the terminal. The reply tool already sent the message — no summary or confirmation is needed. Just call reply and stop.",
       "",
       "The post tool sends a message to this session's Discord channel without needing a chat_id. Use it when you want to proactively share something to Discord.",
       "",
       "reply accepts file paths (files: [\"/abs/path.png\"]) for attachments.",
-      "Use react to add emoji reactions, and edit_message for interim progress updates.",
-      "fetch_messages pulls real Discord history.",
+        "Use react to add emoji reactions, and edit_message for interim progress updates.",
+      "fetch_messages pulls real Discord history. Pass chat_id from the inbound message; channel is accepted only as a legacy alias.",
       "",
       "Conversation mirroring to Discord happens automatically via hooks — you do NOT need to call post for every response.",
     ].join("\n"),
@@ -193,14 +200,15 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "fetch_messages",
-      description: "Fetch recent messages from a Discord channel.",
+      description: "Fetch recent messages from a Discord channel. Pass chat_id from the inbound message. The legacy channel alias is still accepted at runtime.",
       inputSchema: {
         type: "object",
         properties: {
-          channel: { type: "string" },
+          chat_id: { type: "string" },
+          channel: { type: "string", description: "Legacy alias for chat_id." },
           limit: { type: "number", description: "Max messages (default 20, max 100)." },
         },
-        required: ["channel"],
+        required: ["chat_id"],
       },
     },
     {
@@ -258,9 +266,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         return { content: [{ type: "text", text: String(result) }] }
       }
       case "fetch_messages": {
+        const chatId = args.chat_id ?? args.channel
+        if (typeof chatId !== "string" || !/^\d{17,20}$/.test(chatId)) {
+          return {
+            content: [{ type: "text", text: "fetch_messages requires chat_id (Discord snowflake)." }],
+            isError: true,
+          }
+        }
         const result = await requestWs({
           type: "fetch_messages",
-          chatId: args.channel as string,
+          chatId,
           limit: args.limit as number | undefined,
         })
         return { content: [{ type: "text", text: String(result) }] }
@@ -290,8 +305,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 
 // ── Connect ──
 async function connect(): Promise<void> {
-  // Lazy start daemon
-  if (!isDaemonRunning()) {
+  // Lazy start daemon (skipped when an external supervisor owns the daemon
+  // lifecycle; connect/retry behavior below is unchanged)
+  if (process.env.CDR_EXTERNAL_DAEMON === "1") {
+    if (!isDaemonRunning()) {
+      process.stderr.write("discord-router-plugin: external daemon mode, not running yet — will retry\n")
+    }
+  } else if (!isDaemonRunning()) {
     process.stderr.write("discord-router-plugin: daemon not running, starting...\n")
     startDaemon()
     // Wait for daemon to start
@@ -308,7 +328,7 @@ async function connect(): Promise<void> {
 
     ws.onopen = () => {
       process.stderr.write("discord-router-plugin: connected to daemon\n")
-      sendWs({ type: "register", cwd, sessionId })
+      sendWs({ type: "register", cwd, sessionId, channelId: pinnedChannelId })
     }
 
     ws.onmessage = (event) => {
@@ -360,16 +380,30 @@ async function connect(): Promise<void> {
 
 function handleInboundMessage(msg: InboundMessage): void {
   process.stderr.write(`discord-router-plugin: [DEBUG] received inbound: "${msg.content.slice(0, 50)}" from ${msg.user}\n`)
+  const content = formatInboundContent(msg)
   mcp.notification({
     method: "notifications/claude/channel",
     params: {
-      content: msg.content,
+      content,
       meta: {
         chat_id: msg.chatId,
         message_id: msg.messageId,
+        source_chat_id: msg.sourceChatId ?? msg.chatId,
+        source_message_id: msg.sourceMessageId ?? msg.messageId,
         user: msg.user,
         user_id: msg.userId,
         ts: msg.ts,
+        ...(msg.replyTo
+          ? {
+              reply_to_chat_id: msg.replyTo.chatId,
+              reply_to_message_id: msg.replyTo.messageId,
+              reply_to_user: msg.replyTo.user ?? "",
+              reply_to_user_id: msg.replyTo.userId ?? "",
+              reply_to_ts: msg.replyTo.ts ?? "",
+              reply_to_url: msg.replyTo.url ?? "",
+              reply_to_content: (msg.replyTo.content ?? "").slice(0, 1000),
+            }
+          : {}),
         ...(msg.attachmentCount
           ? {
               attachment_count: String(msg.attachmentCount),
@@ -385,6 +419,27 @@ function handleInboundMessage(msg: InboundMessage): void {
   })
 }
 
+function formatInboundContent(msg: InboundMessage): string {
+  if (!msg.replyTo) return msg.content
+
+  const ref = msg.replyTo
+  const lines = [
+    "",
+    "[Discord reply context]",
+    `reply_to_chat_id=${ref.chatId}`,
+    `reply_to_message_id=${ref.messageId}`,
+    ref.user || ref.userId ? `reply_to_author=${ref.user ?? "unknown"}${ref.userId ? ` (${ref.userId})` : ""}` : "",
+    ref.ts ? `reply_to_ts=${ref.ts}` : "",
+    ref.url ? `reply_to_url=${ref.url}` : "",
+    typeof ref.content === "string"
+      ? `reply_to_content=${ref.content || "(empty message)"}`
+      : "reply_to_content=(unavailable; fetch_messages using reply_to_chat_id if needed)",
+    ref.attachmentCount ? `reply_to_attachments=${ref.attachments?.join("; ") ?? String(ref.attachmentCount)}` : "",
+  ].filter(Boolean)
+
+  return `${msg.content}\n${lines.join("\n")}`
+}
+
 function handleResult(msg: ResultMessage): void {
   const pending = pendingRequests.get(msg.requestId)
   if (!pending) return
@@ -392,7 +447,8 @@ function handleResult(msg: ResultMessage): void {
   if (msg.success) {
     pending.resolve(msg.data)
   } else {
-    pending.reject(new Error(msg.error ?? "Unknown error"))
+    const detail = msg.error ?? (typeof msg.data === "string" ? msg.data : undefined) ?? "Unknown error"
+    pending.reject(new Error(detail))
   }
 }
 
@@ -419,7 +475,13 @@ function shutdown(): void {
   setTimeout(() => process.exit(0), 1000)
 }
 
-process.stdin.on("end", shutdown)
-process.stdin.on("close", shutdown)
+// In external-daemon pinned session mode, Claude's MCP stdio lifecycle can close
+// even while the interactive Claude PTY is still visible. Treating stdin close
+// as process shutdown deregisters the Discord session before inbound messages
+// arrive. Keep the router plugin alive until the owning scope sends SIGTERM/SIGINT.
+if (process.env.CDR_EXTERNAL_DAEMON !== "1") {
+  process.stdin.on("end", shutdown)
+  process.stdin.on("close", shutdown)
+}
 process.on("SIGTERM", shutdown)
 process.on("SIGINT", shutdown)
