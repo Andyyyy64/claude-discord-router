@@ -62,6 +62,17 @@ const ACK_ONLY_RE = /^(きた[ー\-\s!！。wｗ]*|来た|了解|りょ|おけ|o
 const DIRECT_FOLLOWUP_RE = /[?？]|(っけ|どう|なに|何|どれ|いつ|誰|どこ|なぜ|なんで|教えて|見て|確認|調べ|お願い|頼む|やって|直して|作って|進め|すすめ|まとめ|ログ|エラー|動いて|生きて|いきて|できる|できた|どうな|どこまで|次|続き|返信|返答|対応|レビュー|実装|修正|原因|状況)/
 const NEGATIVE_FEEDBACK_RE = /(やかましい|うるさい|黙って|だまって|喋るな|しゃべるな|話すな|返すな|お前の存在|存在を消す|調教|割り込むな|割り込まないで|邪魔|じゃま)/
 const pendingByChannel = new Map<string, InboundMessage[]>()
+const WORKLOAD_PRIORITY: Record<string, number> = {
+  human_followup: 10,
+  human_direct: 20,
+  resolver_approved: 30,
+  resolver: 40,
+  background_deadline: 50,
+  background: 60,
+}
+const pendingWorkloadByChannel = new Map<string, { cls: string; priority: number }>()
+const queueNoticeTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const queueNoticeSent = new Set<string>()
 const ambientPendingByChannel = new Map<string, AmbientPending>()
 const dispatchingChannels = new Set<string>()
 const pendingDispatchAttempts = new Map<string, number>()
@@ -408,7 +419,20 @@ async function handleDiscordMessage(msg: any): Promise<void> {
     inbound.chatId = targetChannelId
     recordHumanActivity(targetChannelId, msg.id, msg.content)
   }
-  routeInbound(targetChannelId, msg.content, inbound, { agentThread: agentRequestThread })
+  const workloadClass = agentRequestThread && targetChannelId === msg.channelId
+    ? "human_followup"
+    : "human_direct"
+  const result = routeInbound(targetChannelId, msg.content, inbound, {
+    agentThread: agentRequestThread,
+    workloadClass,
+    queuePriority: WORKLOAD_PRIORITY[workloadClass],
+  })
+  if (
+    messageMentionsAgent(msg.content ?? "") ||
+    (agentRequestThread && shouldRouteAgentThreadFollowup(msg.content ?? ""))
+  ) {
+    void acknowledgeRoutedRequest(targetChannelId, result)
+  }
 }
 
 client.on("typingStart", typing => {
@@ -906,7 +930,13 @@ async function processAmbientCandidate(channelId: string, token: string): Promis
   }
 }
 
-function deliverToSession(channelId: string, inbound: InboundMessage, source: string): RouteResult {
+function deliverToSession(
+  channelId: string,
+  inbound: InboundMessage,
+  source: string,
+  workloadClass = "background",
+  queuePriority = WORKLOAD_PRIORITY.background,
+): RouteResult {
   if (sessionBlockedChannel(channelId)) {
     process.stderr.write(`discord-router: skipped ${source} session routing for reserved channel ${channelId}\n`)
     return { delivered: false, queued: false, dispatched: false, reason: `${source}_session_blocked_channel` }
@@ -914,7 +944,7 @@ function deliverToSession(channelId: string, inbound: InboundMessage, source: st
   const session = router.getSessionByChannel(channelId)
   if (!session) {
     enqueuePending(channelId, inbound)
-    startAutoDispatch(channelId)
+    startAutoDispatch(channelId, workloadClass, queuePriority)
     return { delivered: false, queued: true, dispatched: true, reason: `${source}_queued_for_dispatch` }
   }
   process.stderr.write(`discord-router: [DEBUG] routing ${source} message to session ${session.sessionId.slice(0, 8)} via channel ${session.channelId}\n`)
@@ -1064,7 +1094,14 @@ function routeInbound(
   channelId: string,
   content: string,
   inbound: InboundMessage,
-  opts: { forceDispatch?: boolean; forceRoute?: boolean; source?: string; agentThread?: boolean } = {},
+  opts: {
+    forceDispatch?: boolean
+    forceRoute?: boolean
+    source?: string
+    agentThread?: boolean
+    workloadClass?: string
+    queuePriority?: number
+  } = {},
 ): RouteResult {
   if (sessionBlockedChannel(channelId)) {
     process.stderr.write(`discord-router: skipped inbound session routing for reserved channel ${channelId}\n`)
@@ -1073,11 +1110,15 @@ function routeInbound(
   const session = router.getSessionByChannel(channelId)
   const mentionsAgent = messageMentionsAgent(content)
   const agentThreadFollowup = Boolean(opts.agentThread) && shouldRouteAgentThreadFollowup(content)
+  const workloadClass = opts.workloadClass ?? (mentionsAgent ? "human_direct" : "background")
+  const queuePriority = Number.isFinite(opts.queuePriority)
+    ? Number(opts.queuePriority)
+    : (WORKLOAD_PRIORITY[workloadClass] ?? WORKLOAD_PRIORITY.background)
   if (!session) {
     process.stderr.write(`discord-router: [DEBUG] no session for channel ${channelId}. Active sessions: ${JSON.stringify(router.getAllActiveSessions().map(s => ({ id: s.sessionId.slice(0, 8), ch: s.channelId, cwd: s.cwd })))}\n`)
     if (opts.forceDispatch || mentionsAgent || agentThreadFollowup) {
       enqueuePending(channelId, inbound)
-      startAutoDispatch(channelId)
+      startAutoDispatch(channelId, workloadClass, queuePriority)
       return { delivered: false, queued: true, dispatched: true, reason: "queued_for_dispatch" }
     }
     if (!opts.forceDispatch && shouldConsiderAmbient(content, channelId)) {
@@ -1085,13 +1126,13 @@ function routeInbound(
     }
     if (!AMBIENT_ROUTE_ENABLED && shouldAutoDispatch(channelId, content)) {
       enqueuePending(channelId, inbound)
-      startAutoDispatch(channelId)
+      startAutoDispatch(channelId, workloadClass, queuePriority)
       return { delivered: false, queued: true, dispatched: true, reason: "queued_for_dispatch" }
     }
     return { delivered: false, queued: false, dispatched: false, reason: "no_session" }
   }
   if (opts.forceRoute || mentionsAgent || agentThreadFollowup) {
-    return deliverToSession(channelId, inbound, opts.source ?? "discord")
+    return deliverToSession(channelId, inbound, opts.source ?? "discord", workloadClass, queuePriority)
   }
   if (!opts.forceRoute && shouldConsiderAmbient(content, channelId)) {
     return scheduleAmbientCandidate(channelId, content, inbound)
@@ -1104,7 +1145,7 @@ function routeInbound(
     process.stderr.write(`discord-router: [DEBUG] ambient-route suppressed message for channel ${channelId}: "${content.slice(0, 50)}"\n`)
     return { delivered: false, queued: false, dispatched: false, reason: "ambient_suppressed", sessionId: session.sessionId }
   }
-  return deliverToSession(channelId, inbound, opts.source ?? "discord")
+  return deliverToSession(channelId, inbound, opts.source ?? "discord", workloadClass, queuePriority)
 }
 
 function enqueuePending(channelId: string, msg: InboundMessage): void {
@@ -1121,18 +1162,38 @@ function enqueuePending(channelId: string, msg: InboundMessage): void {
   schedulePendingWatchdog(channelId)
 }
 
-function startAutoDispatch(channelId: string): void {
+function normalizeWorkload(cls: string, priority: number): { cls: string; priority: number } {
+  const normalizedClass = Object.prototype.hasOwnProperty.call(WORKLOAD_PRIORITY, cls) ? cls : "background"
+  return {
+    cls: normalizedClass,
+    priority: Number.isFinite(priority) ? Math.max(0, Math.floor(priority)) : WORKLOAD_PRIORITY[normalizedClass],
+  }
+}
+
+function startAutoDispatch(
+  channelId: string,
+  workloadClass = "background",
+  queuePriority = WORKLOAD_PRIORITY.background,
+): void {
   if (sessionBlockedChannel(channelId)) {
     process.stderr.write(`discord-router: auto-dispatch blocked for reserved channel ${channelId}\n`)
     return
   }
   if (dispatchingChannels.has(channelId)) return
+  const workload = normalizeWorkload(workloadClass, queuePriority)
+  const previous = pendingWorkloadByChannel.get(channelId)
+  if (!previous || workload.priority < previous.priority) {
+    pendingWorkloadByChannel.set(channelId, workload)
+  }
+  const selected = pendingWorkloadByChannel.get(channelId) ?? workload
   dispatchingChannels.add(channelId)
   if (pendingByChannel.has(channelId)) {
     pendingDispatchAttempts.set(channelId, (pendingDispatchAttempts.get(channelId) ?? 0) + 1)
   }
-  process.stderr.write(`discord-router: auto-dispatch spawning session for channel ${channelId}\n`)
-  const child = spawn("bash", [AUTO_DISPATCH_SCRIPT, "dispatch", channelId, AUTO_DISPATCH_CWD], {
+  process.stderr.write(`discord-router: auto-dispatch spawning session for channel ${channelId} class=${selected.cls} priority=${selected.priority}\n`)
+  const cls = selected.cls
+  const priority = selected.priority
+  const child = spawn("bash", [AUTO_DISPATCH_SCRIPT, "dispatch", channelId, AUTO_DISPATCH_CWD, cls, String(priority)], {
     detached: true,
     stdio: "ignore",
     env: {
@@ -1203,7 +1264,12 @@ async function checkPendingDispatch(channelId: string): Promise<void> {
   const registryStatus = sessionRegistryStatus(channelId)
   if (registryStatus === "queued" || registryStatus === "spawning") {
     process.stderr.write(`discord-router: pending watchdog waiting for channel ${channelId} registry=${registryStatus} pending=${pending.length}\n`)
-    startAutoDispatch(channelId)
+    const workload = pendingWorkloadByChannel.get(channelId)
+    startAutoDispatch(
+      channelId,
+      workload?.cls ?? "background",
+      workload?.priority ?? WORKLOAD_PRIORITY.background,
+    )
     schedulePendingWatchdog(channelId)
     return
   }
@@ -1212,7 +1278,12 @@ async function checkPendingDispatch(channelId: string): Promise<void> {
   const maxAttempts = maxPendingDispatchAttempts()
   if (attempts < maxAttempts) {
     process.stderr.write(`discord-router: pending watchdog retry ${attempts + 1}/${maxAttempts} for channel ${channelId} pending=${pending.length}\n`)
-    startAutoDispatch(channelId)
+    const workload = pendingWorkloadByChannel.get(channelId)
+    startAutoDispatch(
+      channelId,
+      workload?.cls ?? "background",
+      workload?.priority ?? WORKLOAD_PRIORITY.background,
+    )
     schedulePendingWatchdog(channelId)
     return
   }
@@ -1220,6 +1291,7 @@ async function checkPendingDispatch(channelId: string): Promise<void> {
   clearPendingWatchdog(channelId)
   pendingDispatchAttempts.set(channelId, maxAttempts + 1)
   pendingByChannel.delete(channelId)
+  pendingWorkloadByChannel.delete(channelId)
   const cooldownMs = Number.isFinite(PENDING_FAILURE_NOTIFY_COOLDOWN_MS)
     ? PENDING_FAILURE_NOTIFY_COOLDOWN_MS
     : 600000
@@ -1255,13 +1327,81 @@ function flushPending(channelId: string): void {
   const session = router.getSessionByChannel(channelId)
   if (!session) return
   pendingByChannel.delete(channelId)
+  pendingWorkloadByChannel.delete(channelId)
   clearPendingWatchdog(channelId)
   pendingDispatchAttempts.delete(channelId)
   process.stderr.write(`discord-router: flushing ${pending.length} pending message(s) to session ${session.sessionId.slice(0, 8)} channel ${channelId}\n`)
   for (const msg of pending) {
     router.sendToSession(channelId, msg)
   }
+  const noticeTimer = queueNoticeTimers.get(channelId)
+  if (noticeTimer) clearTimeout(noticeTimer)
+  queueNoticeTimers.delete(channelId)
+  if (queueNoticeSent.delete(channelId)) {
+    void sendToChannel(client, channelId, "待機を終え、処理を開始しました。").catch(err => {
+      process.stderr.write(`discord-router: queue start notice failed for channel ${channelId}: ${err}\n`)
+    })
+  }
   touchSessionRegistry(channelId)
+}
+
+function queuedPosition(channelId: string): number | null {
+  if (!existsSync(AUTO_DISPATCH_SESS_DIR)) return null
+  const rows: Array<{ threadId: string; priority: number; queuedAt: number }> = []
+  try {
+    for (const file of readdirSync(AUTO_DISPATCH_SESS_DIR)) {
+      if (!file.endsWith(".json")) continue
+      try {
+        const state = JSON.parse(readFileSync(join(AUTO_DISPATCH_SESS_DIR, file), "utf8")) as Record<string, unknown>
+        if (state.status !== "queued") continue
+        rows.push({
+          threadId: String(state.thread_id ?? file.replace(/\.json$/, "")),
+          priority: Number(state.queue_priority ?? WORKLOAD_PRIORITY.background),
+          queuedAt: Number(state.queued_at ?? 0),
+        })
+      } catch {
+        // Ignore one malformed registry entry.
+      }
+    }
+  } catch {
+    return null
+  }
+  rows.sort((a, b) => a.priority - b.priority || a.queuedAt - b.queuedAt || a.threadId.localeCompare(b.threadId))
+  const index = rows.findIndex(row => row.threadId === channelId)
+  return index >= 0 ? index + 1 : null
+}
+
+async function acknowledgeRoutedRequest(channelId: string, result: RouteResult): Promise<void> {
+  const text = result.delivered
+    ? "受け付けました。処理を開始します。"
+    : "受け付けました。Claude Code sessionを起動しています。"
+  try {
+    await sendToChannel(client, channelId, text)
+  } catch (err) {
+    process.stderr.write(`discord-router: textual acknowledgement failed for channel ${channelId}: ${err}\n`)
+    return
+  }
+  if (!result.queued) return
+  const old = queueNoticeTimers.get(channelId)
+  if (old) clearTimeout(old)
+  const timer = setTimeout(() => {
+    queueNoticeTimers.delete(channelId)
+    const status = sessionRegistryStatus(channelId)
+    if (status === "queued") {
+      const position = queuedPosition(channelId)
+      const suffix = position ? `${position}番目です。` : "確認中です。"
+      queueNoticeSent.add(channelId)
+      void sendToChannel(client, channelId, `まだ開始待ちです。現在の待ち順は${suffix}`).catch(err => {
+        process.stderr.write(`discord-router: queue position notice failed for channel ${channelId}: ${err}\n`)
+      })
+    } else if (status === "spawning" && !router.getSessionByChannel(channelId)) {
+      queueNoticeSent.add(channelId)
+      void sendToChannel(client, channelId, "Claude Code sessionを起動中です。開始まで少しお待ちください。").catch(err => {
+        process.stderr.write(`discord-router: startup notice failed for channel ${channelId}: ${err}\n`)
+      })
+    }
+  }, 30000)
+  queueNoticeTimers.set(channelId, timer)
 }
 
 function loadOfficeRequestConfig(): OfficeRequestConfig | null {
@@ -1792,6 +1932,8 @@ function dispatchOfficeAgent(threadId: string, request: any, requestUrl: string)
     forceDispatch: true,
     forceRoute: true,
     source: "office-request",
+    workloadClass: "human_direct",
+    queuePriority: WORKLOAD_PRIORITY.human_direct,
   })
 }
 
@@ -2651,6 +2793,8 @@ const wsServer = Bun.serve<{ sessionId: string }>({
           ts?: string
           forceDispatch?: boolean
           forceRoute?: boolean
+          workloadClass?: string
+          queuePriority?: number
         }
         const channelId = String(body.channelId ?? "")
         const content = String(body.content ?? "")
@@ -2675,6 +2819,8 @@ const wsServer = Bun.serve<{ sessionId: string }>({
           forceDispatch: body.forceDispatch !== false,
           forceRoute: body.forceRoute !== false,
           source: "local-inject",
+          workloadClass: body.workloadClass ?? "background",
+          queuePriority: body.queuePriority,
         })
         return Response.json(result)
       } catch (err) {
