@@ -1309,7 +1309,7 @@ async function checkPendingDispatch(channelId: string): Promise<void> {
     const sentIds = await sendToChannel(
       client,
       channelId,
-      "⚠️ stod-agent の Claude Code session 起動に失敗しました。スレッドは作成済みですが、処理が始まっていません。もう一度メンションしてください。"
+      "⚠️ stod-agent session の起動に失敗しました。スレッドは作成済みですが、処理が始まっていません。もう一度メンションしてください。"
     )
     pendingFailureNotifiedAtByChannel.set(channelId, Date.now())
     recordOutbound(channelId, "pending session failed")
@@ -1378,7 +1378,7 @@ function queuedPosition(channelId: string): number | null {
 async function acknowledgeRoutedRequest(channelId: string, result: RouteResult): Promise<void> {
   const text = result.delivered
     ? "受け付けました。処理を開始します。"
-    : "受け付けました。Claude Code sessionを起動しています。"
+    : "受け付けました。stod-agent sessionを起動しています。"
   try {
     await sendToChannel(client, channelId, text)
   } catch (err) {
@@ -1400,7 +1400,7 @@ async function acknowledgeRoutedRequest(channelId: string, result: RouteResult):
       })
     } else if (status === "spawning" && !router.getSessionByChannel(channelId)) {
       queueNoticeSent.add(channelId)
-      void sendToChannel(client, channelId, "Claude Code sessionを起動中です。開始まで少しお待ちください。").catch(err => {
+      void sendToChannel(client, channelId, "stod-agent sessionを起動中です。開始まで少しお待ちください。").catch(err => {
         process.stderr.write(`discord-router: startup notice failed for channel ${channelId}: ${err}\n`)
       })
     }
