@@ -147,6 +147,9 @@ const ASANA_INTAKE_CWD = process.env.CDR_ASANA_INTAKE_CWD ?? "/home/andy/stod-ag
 const ASANA_INTAKE_PYTHON = process.env.CDR_ASANA_INTAKE_PYTHON ?? "python3"
 const ASANA_SLASH_COMMAND_NAME = process.env.CDR_ASANA_SLASH_COMMAND_NAME ?? "asana"
 const ASANA_MESSAGE_CONTEXT_NAME = process.env.CDR_ASANA_MESSAGE_CONTEXT_NAME ?? "Asanaにする"
+const GMAIL_FOLLOWUP_SCRIPT = process.env.CDR_GMAIL_FOLLOWUP_SCRIPT ?? "/home/andy/stod-agent/scripts/gmail-followup.py"
+const GMAIL_FOLLOWUP_CWD = process.env.CDR_GMAIL_FOLLOWUP_CWD ?? "/home/andy/stod-agent"
+const GMAIL_FOLLOWUP_PYTHON = process.env.CDR_GMAIL_FOLLOWUP_PYTHON ?? "python3"
 
 type RouteResult = {
   delivered: boolean
@@ -2211,6 +2214,80 @@ async function handleGittyScoutInteraction(interaction: any): Promise<boolean> {
   return true
 }
 
+function runGmailFollowup(args: string[]): Promise<OfficeLedgerResult> {
+  return new Promise(resolve => {
+    const child = spawn(GMAIL_FOLLOWUP_PYTHON, [GMAIL_FOLLOWUP_SCRIPT, ...args], {
+      cwd: GMAIL_FOLLOWUP_CWD,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    })
+    let out = ""
+    let err = ""
+    child.stdout?.on("data", data => { out += String(data) })
+    child.stderr?.on("data", data => { err += String(data) })
+    child.on("error", e => resolve({ code: 127, output: e.message }))
+    child.on("close", code => {
+      const output = (out + err).trim()
+      let parsed: any
+      try {
+        parsed = out.trim() ? JSON.parse(out) : undefined
+      } catch {
+        parsed = undefined
+      }
+      resolve({ code: code ?? 1, output, json: parsed })
+    })
+  })
+}
+
+async function handleGmailFollowupInteraction(interaction: any): Promise<boolean> {
+  if (!interaction.isButton?.()) return false
+  const parts = String(interaction.customId || "").split(":")
+  if (parts[0] !== "gmail-followup" || parts[1] !== "approval" || parts.length !== 4) return false
+  const followupId = parts[2]
+  const decision = parts[3]
+  if (decision !== "approved" && decision !== "rejected") {
+    await interaction.reply({ content: "不明なGmail follow-up承認操作です。", ephemeral: true })
+    return true
+  }
+
+  await interaction.deferReply({ ephemeral: true })
+  const result = await runGmailFollowup([
+    "decide",
+    "--id", followupId,
+    "--decision", decision,
+    "--actor-id", interaction.user.id,
+    "--reason", `Discord Gmail follow-up approval button: ${decision}`,
+    ...(decision === "approved" ? ["--send"] : []),
+  ])
+  if (result.code !== 0 || !result.json?.ok) {
+    await interaction.editReply(`❌ Gmail follow-upの${decision === "approved" ? "承認・送信" : "差し戻し"}に失敗しました: \`${followupId}\`\n${result.output.slice(0, 1200)}`)
+    process.stderr.write(`discord-router: Gmail follow-up decision failed rc=${result.code}: ${result.output.slice(0, 500)}\n`)
+    return true
+  }
+
+  try {
+    await interaction.message.edit({
+      content: `${interaction.message.content}\n\n状態: \`${result.json.status}\` by <@${interaction.user.id}>`,
+      components: [],
+      allowedMentions: { parse: [] },
+    })
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err)
+    process.stderr.write(`discord-router: Gmail follow-up message edit failed: ${errorMsg}\n`)
+  }
+
+  if (decision === "rejected") {
+    await interaction.editReply(`✅ Gmail follow-up \`${followupId}\` を差し戻しました。送信していません。`)
+    return true
+  }
+  if (!result.json.sentVerified) {
+    await interaction.editReply(`⚠️ Gmail follow-up \`${followupId}\` は処理されましたが、SENT再取得の検証結果を確認できません。再送せずledgerを確認してください。`)
+    return true
+  }
+  await interaction.editReply(`✅ Gmail follow-up \`${followupId}\` を送信し、KazuhaのSENT再取得まで検証しました。CRM反映: ${result.json.crmRecorded ? "済み" : "要確認"}`)
+  return true
+}
+
 // ── WebSocket Server ──
 async function handleResidentAgentApprovalButton(interaction: any): Promise<boolean> {
   if (!interaction.isButton?.()) return false
@@ -2367,6 +2444,7 @@ function actionLabel(action: string): string {
 async function handleInteraction(interaction: any): Promise<void> {
   if (await handleAsanaInteraction(interaction)) return
   if (await handleOfficeInteraction(interaction)) return
+  if (await handleGmailFollowupInteraction(interaction)) return
   if (await handleGittyScoutInteraction(interaction)) return
   if (await handleResidentAgentApprovalButton(interaction)) return
   if (!interaction.isButton?.()) return
