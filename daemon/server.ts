@@ -758,12 +758,16 @@ function sessionRegistryChannelForSession(sessionId: string): string {
   return ""
 }
 
-function touchSessionRegistry(channelId: string): void {
+function touchSessionRegistry(channelId: string, firstInboundDelivered = false): void {
   const path = join(AUTO_DISPATCH_SESS_DIR, `${channelId}.json`)
   if (!existsSync(path)) return
   try {
     const state = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>
-    state.last_activity = Math.floor(Date.now() / 1000)
+    const now = Math.floor(Date.now() / 1000)
+    state.last_activity = now
+    if (firstInboundDelivered && Number(state.first_inbound_at ?? 0) <= 0) {
+      state.first_inbound_at = now
+    }
     const tmp = join(AUTO_DISPATCH_SESS_DIR, `.tmp.${channelId}.${process.pid}.${Date.now()}`)
     writeFileSync(tmp, `${JSON.stringify(state)}\n`, { mode: 0o600 })
     renameSync(tmp, path)
@@ -949,7 +953,7 @@ function deliverToSession(
   }
   process.stderr.write(`discord-router: [DEBUG] routing ${source} message to session ${session.sessionId.slice(0, 8)} via channel ${session.channelId}\n`)
   router.sendToSession(channelId, inbound)
-  touchSessionRegistry(channelId)
+  touchSessionRegistry(channelId, true)
   return { delivered: true, queued: false, dispatched: false, reason: "delivered", sessionId: session.sessionId }
 }
 
@@ -1342,7 +1346,7 @@ function flushPending(channelId: string): void {
       process.stderr.write(`discord-router: queue start notice failed for channel ${channelId}: ${err}\n`)
     })
   }
-  touchSessionRegistry(channelId)
+  touchSessionRegistry(channelId, true)
 }
 
 function queuedPosition(channelId: string): number | null {
