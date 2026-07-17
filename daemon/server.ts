@@ -1089,6 +1089,10 @@ async function runAmbientJudge(channelId: string, inbound: InboundMessage): Prom
   const session = router.getSessionByChannel(channelId)
   if (!session) throw new Error(`session disappeared for channel ${channelId}`)
   router.sendToSession(channelId, judgeInbound)
+  // The judge prompt is a real first inbound for this Claude session. Without
+  // this touch, the supervisor treats a successful silent judgment as an
+  // unused pre-warm and discards it after the first-inbound grace period.
+  touchSessionRegistry(channelId, true)
   const timeout = Number.isFinite(AMBIENT_JUDGE_TIMEOUT_MS) ? AMBIENT_JUDGE_TIMEOUT_MS : 90000
   const text = await waitLocalResult(marker, timeout)
   return parseAmbientDecision(text, marker)
