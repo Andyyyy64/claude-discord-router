@@ -412,7 +412,11 @@ async function handleDiscordMessage(msg: any): Promise<void> {
 
   const targetChannelId = await routeTargetForMessage(msg)
   const agentRequestThread = targetChannelId !== msg.channelId || isAgentRequestThreadChannel(targetChannelId, msg.channel)
-  if (messageMentionsAgent(msg.content ?? "")) {
+  const mentionsAgent = messageMentionsAgent(msg.content ?? "")
+  const agentThreadFollowup = targetChannelId === msg.channelId
+    && agentRequestThread
+    && shouldRouteAgentThreadFollowup(msg.content ?? "")
+  if (mentionsAgent || agentThreadFollowup) {
     void acknowledgeRoutedMessage(msg)
   }
   if (targetChannelId !== msg.channelId) {
@@ -427,11 +431,13 @@ async function handleDiscordMessage(msg: any): Promise<void> {
     workloadClass,
     queuePriority: WORKLOAD_PRIORITY[workloadClass],
   })
-  if (
-    messageMentionsAgent(msg.content ?? "") ||
-    (agentRequestThread && shouldRouteAgentThreadFollowup(msg.content ?? ""))
-  ) {
-    void acknowledgeRoutedRequest(targetChannelId, result)
+  if (mentionsAgent || agentThreadFollowup) {
+    // A follow-up inside an existing agent thread is already contextualized by
+    // the thread. React on the user's message, but do not add a repetitive
+    // textual acknowledgement to the conversation. New parent-channel
+    // requests still receive the startup text, and queued follow-ups still get
+    // a delayed queue/status notice if they remain blocked for 30 seconds.
+    void acknowledgeRoutedRequest(targetChannelId, result, !agentThreadFollowup)
   }
 }
 
@@ -1379,15 +1385,17 @@ function queuedPosition(channelId: string): number | null {
   return index >= 0 ? index + 1 : null
 }
 
-async function acknowledgeRoutedRequest(channelId: string, result: RouteResult): Promise<void> {
-  const text = result.delivered
-    ? "受け付けました。処理を開始します。"
-    : "受け付けました。stod-agent sessionを起動しています。"
-  try {
-    await sendToChannel(client, channelId, text)
-  } catch (err) {
-    process.stderr.write(`discord-router: textual acknowledgement failed for channel ${channelId}: ${err}\n`)
-    return
+async function acknowledgeRoutedRequest(channelId: string, result: RouteResult, textual = true): Promise<void> {
+  if (textual) {
+    const text = result.delivered
+      ? "受け付けました。処理を開始します。"
+      : "受け付けました。stod-agent sessionを起動しています。"
+    try {
+      await sendToChannel(client, channelId, text)
+    } catch (err) {
+      process.stderr.write(`discord-router: textual acknowledgement failed for channel ${channelId}: ${err}\n`)
+      return
+    }
   }
   if (!result.queued) return
   const old = queueNoticeTimers.get(channelId)
