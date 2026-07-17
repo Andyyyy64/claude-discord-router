@@ -2405,6 +2405,9 @@ function omissionActionArgs(customId: string): string[] | null {
   if (action === "approve") return ["approve", requestId]
   if (action === "resolve") return ["resolve", requestId]
   if (action === "ignore") return ["ignore", requestId]
+  if (action === "progress") return ["transition", requestId, "in_progress"]
+  if (action === "block") return ["transition", requestId, "blocked"]
+  if (action === "waiting") return ["transition", requestId, "waiting_external"]
   if (action === "snooze") {
     const days = parts[3] ?? "3"
     if (!/^\d{1,3}$/.test(days)) return null
@@ -2438,6 +2441,7 @@ function actionLabel(action: string): string {
   if (action === "resolve") return "解決済み"
   if (action === "ignore") return "誤検知クローズ"
   if (action === "snooze") return "保留"
+  if (action === "transition") return "状態更新"
   return action
 }
 
@@ -2462,7 +2466,8 @@ async function handleInteraction(interaction: any): Promise<void> {
     return
   }
   await interaction.deferReply({ ephemeral: true })
-  const result = await runOmissionAction(args)
+  const commandArgs = args[0] === "transition" ? [...args, "--actor-id", interaction.user.id] : args
+  const result = await runOmissionAction(commandArgs)
   const label = actionLabel(args[0])
   if (result.code === 0) {
     await interaction.editReply(`✅ ${label} を実行しました: \`${args[1]}\``)
