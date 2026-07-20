@@ -2420,7 +2420,7 @@ function omissionActionAllowed(userId: string): boolean {
   return OMISSION_ACTION_ALLOW_IDS.includes("*") || OMISSION_ACTION_ALLOW_IDS.includes(userId)
 }
 
-function runOmissionAction(args: string[]): Promise<{ code: number; output: string }> {
+function runOmissionAction(args: string[]): Promise<{ code: number; output: string; json?: any }> {
   return new Promise(resolve => {
     const child = spawn(OMISSION_ACTION_PYTHON, [OMISSION_ACTION_SCRIPT, ...args], {
       cwd: OMISSION_ACTION_CWD,
@@ -2432,17 +2432,45 @@ function runOmissionAction(args: string[]): Promise<{ code: number; output: stri
     child.stdout?.on("data", data => { out += String(data) })
     child.stderr?.on("data", data => { err += String(data) })
     child.on("error", e => resolve({ code: 127, output: e.message }))
-    child.on("close", code => resolve({ code: code ?? 1, output: (out + err).trim() }))
+    child.on("close", code => {
+      const output = (out + err).trim()
+      let parsed: any
+      try {
+        parsed = out.trim() ? JSON.parse(out) : undefined
+      } catch {
+        parsed = undefined
+      }
+      resolve({ code: code ?? 1, output, json: parsed })
+    })
   })
 }
 
 function actionLabel(action: string): string {
-  if (action === "approve") return "承認"
+  if (action === "approve") return "ナッジ送信"
   if (action === "resolve") return "解決済み"
   if (action === "ignore") return "誤検知クローズ"
   if (action === "snooze") return "保留"
   if (action === "transition") return "状態更新"
   return action
+}
+
+function disabledOmissionComponents(message: any): any[] {
+  return (message?.components ?? []).map((row: any) => {
+    const raw = typeof row.toJSON === "function" ? row.toJSON() : row
+    return {
+      ...raw,
+      components: (row.components ?? raw.components ?? []).map((component: any) => {
+        const button = typeof component.toJSON === "function" ? component.toJSON() : component
+        return { ...button, disabled: true }
+      }),
+    }
+  })
+}
+
+function omissionAlreadyUpdatedMessage(result: any): string {
+  const lifecycle = String(result?.lifecycle || result?.status || "更新済み")
+  const reason = String(result?.closed_reason || "").replaceAll("_", " ")
+  return `ℹ️ この候補は既に状態更新済みです（${lifecycle}${reason ? ` / ${reason}` : ""}）。古いナッジは送信していません。`
 }
 
 async function handleInteraction(interaction: any): Promise<void> {
@@ -2470,6 +2498,26 @@ async function handleInteraction(interaction: any): Promise<void> {
   const result = await runOmissionAction(commandArgs)
   const label = actionLabel(args[0])
   if (result.code === 0) {
+    if (result.json?.noop === "already_terminal") {
+      const statusText = omissionAlreadyUpdatedMessage(result.json)
+      try {
+        const suffix = `\n\n状態: ${statusText}`
+        const current = String(interaction.message?.content || "")
+        const content = current.includes("この候補は既に状態更新済み")
+          ? current
+          : `${current.slice(0, Math.max(0, 2000 - suffix.length))}${suffix}`
+        await interaction.message?.edit({
+          content,
+          components: disabledOmissionComponents(interaction.message),
+          allowedMentions: { parse: [] },
+        })
+      } catch (err) {
+        process.stderr.write(`discord-router: stale omission review edit failed ${args[1]}: ${String(err)}\n`)
+      }
+      await interaction.editReply(statusText)
+      process.stderr.write(`discord-router: omission ${args[0]} ${args[1]} noop already_terminal by ${interaction.user.id}\n`)
+      return
+    }
     await interaction.editReply(`✅ ${label} を実行しました: \`${args[1]}\``)
     process.stderr.write(`discord-router: omission ${args[0]} ${args[1]} by ${interaction.user.id}\n`)
   } else {
