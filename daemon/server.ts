@@ -2284,6 +2284,10 @@ async function handleGmailFollowupInteraction(interaction: any): Promise<boolean
     await interaction.editReply(`⚠️ Gmail follow-up \`${followupId}\` は処理されましたが、SENT再取得の検証結果を確認できません。再送せずledgerを確認してください。`)
     return true
   }
+  if (result.json.reconciledExistingSent) {
+    await interaction.editReply(`✅ Gmail follow-up \`${followupId}\` はGmail上ですでに送信済みと検出しました。再送せずledgerへ取り込み、CRM反映: ${result.json.crmRecorded ? "済み" : "要確認"}`)
+    return true
+  }
   await interaction.editReply(`✅ Gmail follow-up \`${followupId}\` を送信し、KazuhaのSENT再取得まで検証しました。CRM反映: ${result.json.crmRecorded ? "済み" : "要確認"}`)
   return true
 }
