@@ -13,6 +13,17 @@ import { homedir } from "os"
 import type { Config, State, CategoryEntry, ChannelEntry } from "../shared/protocol.ts"
 import { saveState } from "./config.ts"
 
+const NO_MENTION_CHANNEL_IDS = new Set(
+  (process.env.CDR_NO_MENTION_CHANNEL_IDS ?? "")
+    .split(",")
+    .map(id => id.trim())
+    .filter(Boolean)
+)
+
+export function containsDiscordMention(text: string): boolean {
+  return /<@!?\d{17,20}>|<@&\d{17,20}>|@(everyone|here)\b/i.test(text)
+}
+
 export function createDiscordClient(): Client {
   return new Client({
     intents: [
@@ -184,6 +195,12 @@ export async function sendToChannel(
   if (!channel || !channel.isTextBased() || !("send" in channel)) {
     throw new Error(`Channel ${channelId} not found or not sendable`)
   }
+  const noMentions = NO_MENTION_CHANNEL_IDS.has(channelId)
+  if (noMentions && containsDiscordMention(text)) {
+    throw new Error(
+      `Mentions are not allowed in read-only log channel ${channelId}; use an escalation route instead`
+    )
+  }
 
   // Discord 2000 char limit - split if needed
   const chunks = chunkText(text, 2000)
@@ -192,6 +209,7 @@ export async function sendToChannel(
   for (let i = 0; i < chunks.length; i++) {
     const sent = await channel.send({
       content: chunks[i],
+      ...(noMentions ? { allowedMentions: { parse: [], users: [], roles: [], repliedUser: false } } : {}),
       ...(i === 0 && options?.files ? { files: options.files } : {}),
       ...(i === 0 && options?.replyTo
         ? { reply: { messageReference: options.replyTo, failIfNotExists: false } }
